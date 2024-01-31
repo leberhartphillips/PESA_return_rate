@@ -1,4 +1,23 @@
 #### set up R enviroment ----
+# a vector of all the packages needed in the project
+packages_required_in_project <- c("sf", "raster", "sp", "rgdal", "tidyverse", "spatstat", "geosphere", "adehabitatLT", "patchwork", "viridis")
+
+# of the required packages, check if some need to be installed
+new.packages <- 
+  packages_required_in_project[!(packages_required_in_project %in% 
+                                   installed.packages()[,"Package"])]
+
+# install all packages that are not locally available
+if(length(new.packages)) install.packages(new.packages)
+
+# load all the packages into the current R session
+lapply(packages_required_in_project, require, character.only = TRUE)
+
+# set the home directory to where the project is locally based (i.e., to find 
+# the relevant datasets to import, etc.
+here::set_here()
+
+
 # Find fonts from computer that you want. Use regular expressions to do this
 # For example, load all fonts that are 'verdana' or 'Verdana'
 extrafont::font_import(pattern = "[V/v]erdana", prompt = FALSE) 
@@ -27,24 +46,6 @@ luke_theme <-
     panel.border = element_rect(linetype = "solid", colour = "grey"),
     legend.position = c(0.1, 0.9)
   )
-
-# a vector of all the packages needed in the project
-packages_required_in_project <- c("sf", "raster", "sp", "rgdal", "tidyverse", "spatstat", "geosphere", "adehabitatLT", "patchwork", "viridis")
-
-# of the required packages, check if some need to be installed
-new.packages <- 
-  packages_required_in_project[!(packages_required_in_project %in% 
-                                   installed.packages()[,"Package"])]
-
-# install all packages that are not locally available
-if(length(new.packages)) install.packages(new.packages)
-
-# load all the packages into the current R session
-lapply(packages_required_in_project, require, character.only = TRUE)
-
-# set the home directory to where the project is locally based (i.e., to find 
-# the relevant datasets to import, etc.
-here::set_here()
 
 #### data import ----
 # import data and convert to a spatial feature with WGS84 coordinate system, 
@@ -98,7 +99,7 @@ kd_bind_rows <- do.call(bind_rows, kd_list)
 
 # plot the year-specific kernel densities of the male locations
 plot_kd <-
-  ggplot(plot_bind_rows, aes(x = x, y = y, color = probability)) +
+  ggplot(kd_bind_rows, aes(x = x, y = y, color = probability)) +
   geom_point() +
   scale_color_viridis() + 
   facet_wrap(~ year_) +
@@ -118,6 +119,47 @@ nrand_pts = 1000
 # create an emply list to store results
 result_list <- list()
 
+pesa_df <- 
+  read.csv("data/data_pecs.csv", colClasses = "character") %>% 
+  mutate(date = as.POSIXct(paste(year_, "01", "01", sep = "-")),
+         longit = as.numeric(longit),
+         latit = as.numeric(latit))
+
+returning_birds <- 
+  read.csv("data/data_pecs.csv", colClasses = "character") %>% 
+  group_by(ID) %>% 
+  summarise(n_obs = n()) %>% 
+  filter(n_obs > 1) %>% 
+  pull(ID) %>% 
+  unique()
+
+# specify coordinate columns
+coordinates(pesa_df) <- c("longit","latit")
+
+# define spatial projection as WGS84
+proj4string(pesa_df) <- CRS("+init=epsg:4326")
+
+# make a spatial trajectory object of each animal's encounter history
+tr_pesa_wp <- 
+  as.ltraj(xy = sp::coordinates(pesa_df),
+           date = pesa_df$date,
+           id = pesa_df$ID)
+
+# convert the trajectory object back to a dataframe, rename columns, and
+# calculate the cumulative distance traveled over the observation
+dist_y1_y2 <-
+  ld(tr_pesa_wp) %>% 
+  dplyr::rename(distance = dist,
+                ID = id) %>% 
+  filter(!is.na(distance)) %>% 
+  group_by(ID) %>%
+  arrange(date) %>%
+  slice(1) %>% 
+  mutate(distance = distance * 100000,
+         year_ = year(date),
+         years_ago = dt/60/60/24/365) %>% 
+  dplyr::select(ID, distance, year_, years_ago)
+
 # a for loop that cycles through each male that returned and 1) samples a number 
 # random points (specified by the "nrand_pts" object above) according to the 
 # year-specific kernel density surfaces shown above, 2) calculates the distance
@@ -126,6 +168,7 @@ for(i in 1:length(unique(returning_birds))){
   
   focal_year <- 
     pesa_df %>% 
+    as.data.frame() %>% 
     filter(ID == returning_birds[i]) %>% 
     arrange(date) %>% 
     slice(2) %>% 
@@ -133,7 +176,8 @@ for(i in 1:length(unique(returning_birds))){
     pull(year_)
   
   focal_bird <- 
-    pesa_df %>% 
+    pesa_df %>%
+    as.data.frame() %>% 
     filter(ID == returning_birds[i]) %>% 
     arrange(date) %>% 
     slice(2) %>% 
@@ -145,6 +189,7 @@ for(i in 1:length(unique(returning_birds))){
   
   pesa_df_ <- 
     pesa_df %>% 
+    as.data.frame() %>% 
     filter(year(date) == focal_bird$year_) %>% 
     st_as_sf(., coords = c("longit", "latit"), 
              crs = 4326) %>% 
@@ -159,9 +204,7 @@ for(i in 1:length(unique(returning_birds))){
   
   # create a kernal density pixel image
   mcp_kd <- density.ppp(mcp_w_ppp)
-  
-  plot(mcp_kd)
-  
+
   # convert the kernal density estimate to a probability
   mcp_kd_df <- 
     as.data.frame(mcp_kd) %>% 
@@ -178,7 +221,7 @@ for(i in 1:length(unique(returning_birds))){
   
   distances <- 
     data.frame(rand_dist = as.numeric(st_distance(rand_points, focal_bird,  by_element = FALSE)), 
-               true_dist = filter(dist_y1_y2, ring_ID == returning_birds[i]) %>% pull(distance), 
+               true_dist = filter(dist_y1_y2, ID == returning_birds[i]) %>% pull(distance), 
                ID = returning_birds[i]) %>% 
     mutate(dist_diff = rand_dist - true_dist)
   
